@@ -1,6 +1,7 @@
-"""LLM service using OpenAI GPT-4o Realtime API."""
+"""LLM service using OpenAI GPT-4o API with optional function-calling tools."""
 
-from typing import Callable, Optional, List, Dict
+import json
+from typing import Callable, Optional, List, Dict, Awaitable, Union
 from loguru import logger
 from openai import AsyncOpenAI
 
@@ -8,24 +9,28 @@ from config import settings
 
 
 class LLMService:
-    """Manages conversation with GPT-4o Realtime API."""
+    """Manages conversation with GPT-4o, supporting optional tool/function calls."""
 
     def __init__(
         self,
         on_response: Callable[[str], None],
-        on_function_call: Optional[Callable[[str, Dict], None]] = None
+        on_function_call: Optional[Callable[[str, Dict], Awaitable[str]]] = None,
+        tools: Optional[List[Dict]] = None,
     ):
         """
         Initialize LLM service.
 
         Args:
-            on_response: Callback function(response_text: str)
-            on_function_call: Optional callback for function calls
+            on_response: Callback(response_text: str) — called with final text reply.
+            on_function_call: Async callback(function_name: str, args: Dict) → str (JSON result).
+                              Required when tools are provided.
+            tools: OpenAI tool definitions (list of {"type": "function", ...} dicts).
         """
         self.on_response = on_response
         self.on_function_call = on_function_call
+        self.tools = tools or []
         self.client: Optional[AsyncOpenAI] = None
-        self.conversation_history: List[Dict[str, str]] = []
+        self.conversation_history: List[Dict] = []
         self.system_prompt: str = ""
 
     def connect(self):
@@ -162,6 +167,109 @@ class LLMService:
 
         except Exception as e:
             logger.error(f"❌ LLM: Streaming error: {e}")
+
+    async def generate_response_with_tools(self, user_input: str) -> str:
+        """
+        Generate a response with tool/function-calling support.
+
+        Flow:
+          1. Call GPT-4o with the current tools list.
+          2. If GPT-4o returns a tool_call, invoke on_function_call with the
+             function name + args and feed the result back to GPT-4o.
+          3. Repeat until GPT-4o returns a plain text response.
+          4. Call on_response(text) with the final reply.
+
+        Falls back to plain generate_response() if no tools are configured.
+        """
+        if not self.tools:
+            return await self.generate_response(user_input)
+
+        if not self.client:
+            logger.error("❌ LLM: Client not initialized")
+            return "I'm sorry, I'm having technical difficulties."
+
+        self.add_user_message(user_input)
+
+        # Build message list (system + last 10 turns)
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.extend(self.conversation_history[-10:])
+
+        MAX_TOOL_ROUNDS = 3  # safety cap to prevent infinite loops
+        for _ in range(MAX_TOOL_ROUNDS):
+            try:
+                response = await self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    tools=self.tools,
+                    tool_choice="auto",
+                    temperature=0.7,
+                    max_tokens=400,
+                )
+            except Exception as e:
+                logger.error(f"❌ LLM: API error: {e}")
+                return "I apologize, I'm having trouble processing that."
+
+            choice = response.choices[0]
+
+            # ── Plain text response → done ────────────────────────────────
+            if choice.finish_reason == "stop" or not choice.message.tool_calls:
+                text = choice.message.content or ""
+                self.add_assistant_message(text)
+                if self.on_response:
+                    self.on_response(text)
+                logger.debug(f"🤖 LLM (tools): {text[:120]}")
+                return text
+
+            # ── Tool call(s) → execute each, feed results back ────────────
+            assistant_msg = {
+                "role": "assistant",
+                "content": choice.message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in choice.message.tool_calls
+                ],
+            }
+            messages.append(assistant_msg)
+
+            for tool_call in choice.message.tool_calls:
+                fn_name = tool_call.function.name
+                try:
+                    fn_args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    fn_args = {}
+
+                logger.info(f"🔧 LLM tool call: {fn_name}({fn_args})")
+
+                if self.on_function_call:
+                    try:
+                        tool_result = await self.on_function_call(fn_name, fn_args)
+                    except Exception as e:
+                        logger.error(f"❌ Tool call execution failed ({fn_name}): {e}")
+                        tool_result = json.dumps({"error": str(e)})
+                else:
+                    tool_result = json.dumps({"error": "No function call handler registered."})
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result,
+                })
+
+        # Fallback if loop exhausted
+        logger.warning("⚠️  LLM: Tool call loop limit reached, returning safe fallback.")
+        fallback = "I'm looking into that for you. Could you give me just a moment?"
+        if self.on_response:
+            self.on_response(fallback)
+        return fallback
 
     def clear_history(self):
         """Clear conversation history."""

@@ -44,8 +44,14 @@ class Settings:
     salesforce_client_id: str = os.getenv("SALESFORCE_CLIENT_ID", "")
     salesforce_client_secret: str = os.getenv("SALESFORCE_CLIENT_SECRET", "")
 
-    # Google Calendar (Optional)
+    # Firebase / Firestore (Feature #4 – Appointment Setting)
+    firebase_service_account_path: str = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "")
+    firebase_project_id: str = os.getenv("FIREBASE_PROJECT_ID", "paytm-hackathon-1")
+
+    # Google Calendar (Feature #4 – Appointment Setting)
     google_calendar_credentials_path: str = os.getenv("GOOGLE_CALENDAR_CREDENTIALS_PATH", "")
+    google_calendar_service_account_path: str = os.getenv("GOOGLE_CALENDAR_SERVICE_ACCOUNT_PATH", "")
+    google_calendar_delegate_email: str = os.getenv("GOOGLE_CALENDAR_DELEGATE_EMAIL", "")
 
     # SendGrid (Optional)
     sendgrid_api_key: str = os.getenv("SENDGRID_API_KEY", "")
