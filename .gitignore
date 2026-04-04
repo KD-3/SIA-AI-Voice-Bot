@@ -34,3 +34,7 @@ out/
 
 # Generated
 *.log
+.env
+venv/
+*.pyc
+.pytest_cache/
