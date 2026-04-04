@@ -40,11 +40,40 @@ async def startup_event():
     """Start ngrok tunnel on startup (if enabled)."""
     if settings.enable_ngrok:
         try:
-            from pyngrok import ngrok, conf
+            import ssl, urllib.request
+            from pyngrok import ngrok, conf, installer
+
+            # macOS Python 3.13 ships without system CA certs linked;
+            # patch urllib to skip verification only for the one-time
+            # ngrok binary download (dev machine only).
+            _no_verify_ctx = ssl.create_default_context()
+            _no_verify_ctx.check_hostname = False
+            _no_verify_ctx.verify_mode = ssl.CERT_NONE
+            urllib.request.install_opener(
+                urllib.request.build_opener(
+                    urllib.request.HTTPSHandler(context=_no_verify_ctx)
+                )
+            )
+
+            pyngrok_cfg = conf.get_default()
             if settings.ngrok_auth_token:
-                conf.get_default().auth_token = settings.ngrok_auth_token
-            tunnel = ngrok.connect(settings.app_port, "http")
-            # Strip the https:// prefix — we store just the hostname
+                pyngrok_cfg.auth_token = settings.ngrok_auth_token
+
+            # Download binary if not already present
+            import os
+            if not os.path.isfile(pyngrok_cfg.ngrok_path):
+                installer.install_ngrok(pyngrok_cfg.ngrok_path)
+
+            # Restore default opener after download
+            urllib.request.install_opener(urllib.request.build_opener())
+
+            # Reuse existing tunnel if server auto-reloaded
+            existing = ngrok.get_tunnels()
+            if existing:
+                tunnel = existing[0]
+            else:
+                tunnel = ngrok.connect(settings.app_port, "http")
+            # Store just the hostname (strip scheme prefix)
             settings.ngrok_url = tunnel.public_url.replace("https://", "").replace("http://", "")
             logger.info(f"🌐 ngrok tunnel active: https://{settings.ngrok_url}")
         except Exception as e:
@@ -71,9 +100,104 @@ async def health():
         "exotel_configured": bool(settings.exotel_account_sid),
         "openai_configured": bool(settings.openai_api_key),
         "deepgram_configured": bool(settings.deepgram_api_key),
-        "elevenlabs_configured": bool(settings.elevenlabs_api_key),
+        "elevenlabs_configured": bool(getattr(settings, "elevenlabs_api_key", "")),
         "ngrok_url": settings.ngrok_url or None,
     }
+
+
+@app.post("/api/calls/twilio/outbound")
+async def initiate_twilio_outbound(request: Request):
+    """
+    Trigger an outbound call via Twilio.
+    Body: {"to_phone": "+91…", "lead_name": "…", "lead_area": "…"}
+    """
+    from urllib.parse import urlencode
+    import httpx
+    body = await request.json()
+    to_phone: str  = body.get("to_phone", "").strip()
+    lead_name: str  = body.get("lead_name", "")
+    lead_area: str  = body.get("lead_area", "")
+
+    if not to_phone:
+        return {"error": "to_phone is required"}
+
+    session_id = f"call_{uuid.uuid4().hex[:12]}"
+
+    base = (
+        f"https://{settings.ngrok_url}"
+        if settings.ngrok_url
+        else str(request.base_url).rstrip("/")
+    )
+    params      = urlencode({"session_id": session_id, "lead_name": lead_name, "lead_area": lead_area})
+    answer_url  = f"{base}/api/calls/twilio/answer?{params}"
+    status_url  = f"{base}/api/calls/twilio/status"
+
+    logger.info(f"📞 Twilio outbound | to={to_phone} | session={session_id}")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{settings.twilio_account_sid}/Calls.json",
+                data={
+                    "To":   to_phone,
+                    "From": settings.twilio_phone_number,
+                    "Url":  answer_url,
+                    "StatusCallback": status_url,
+                    "TimeLimit": "600",
+                },
+                auth=(settings.twilio_account_sid, settings.twilio_auth_token),
+            )
+            resp.raise_for_status()
+            call_sid = resp.json().get("sid", "")
+            logger.info(f"✅ Twilio call created | CallSid={call_sid}")
+            return {"session_id": session_id, "call_sid": call_sid, "status": "initiated"}
+    except httpx.HTTPStatusError as e:
+        body = e.response.text[:500] if e.response else ""
+        logger.error(f"❌ Twilio outbound failed: {e} | body={body}")
+        return {"error": str(e), "detail": body}
+    except Exception as e:
+        logger.error(f"❌ Twilio outbound failed: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/calls/twilio/answer")
+async def handle_twilio_answer(
+    request: Request,
+    session_id: str = "",
+    lead_name: str = "",
+    lead_area: str = "",
+):
+    """
+    Twilio calls this when the merchant picks up.
+    Returns TwiML to connect the call to our media-stream WebSocket.
+    """
+    ws_host = settings.ngrok_url or request.url.hostname
+    ws_url  = f"wss://{ws_host}/ws/calls/{session_id}"
+
+    logger.info(f"📲 Twilio outbound answered | session={session_id} | stream={ws_url}")
+
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{ws_url}">
+            <Parameter name="sessionId" value="{session_id}" />
+            <Parameter name="leadName"  value="{lead_name}" />
+            <Parameter name="leadArea"  value="{lead_area}" />
+        </Stream>
+    </Connect>
+</Response>"""
+    return Response(content=twiml, media_type="application/xml")
+
+
+@app.post("/api/calls/twilio/status")
+async def handle_twilio_status(request: Request):
+    """Receive Twilio call lifecycle events."""
+    form_data = await request.form()
+    logger.info(
+        f"📊 Twilio status | CallSid={form_data.get('CallSid','')} | "
+        f"Status={form_data.get('CallStatus','')} | Duration={form_data.get('CallDuration','0')}s"
+    )
+    return Response(content="", status_code=204)
 
 
 @app.post("/api/calls/inbound")
@@ -138,12 +262,20 @@ async def websocket_call_handler(websocket: WebSocket, session_id: str):
             if event == "start":
                 # Call started - initialize session
                 start_data = data.get("start", {})
-                caller_id = start_data.get("customParameters", {}).get("callerId", "Unknown")
+                params    = start_data.get("customParameters", {})
+                caller_id = params.get("callerId", "Unknown")
+
+                # Outbound calls pass lead context via Stream parameters
+                lead_data = {}
+                if params.get("leadName"):
+                    lead_data["lead_name"] = params["leadName"]
+                if params.get("leadArea"):
+                    lead_data["lead_area"] = params["leadArea"]
 
                 logger.info(f"▶️  Call started: {session_id} from {caller_id}")
 
                 # Create and initialize session
-                session = CallSession(session_id, caller_id)
+                session = CallSession(session_id, caller_id, lead_data=lead_data or None)
                 sessions[session_id] = session
                 await session.initialize()
 
