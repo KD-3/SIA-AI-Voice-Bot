@@ -134,7 +134,13 @@ TONE: Friendly, professional, helpful (like a great SDR)
             self.is_ai_speaking = False
 
         # Generate response from LLM
-        asyncio.create_task(self._process_user_input(transcript))
+        # Get the running event loop and schedule the task
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._process_user_input(transcript))
+        except RuntimeError:
+            # Fallback if no event loop is running
+            asyncio.ensure_future(self._process_user_input(transcript))
 
         # Clear transcript buffer
         self.current_transcript = ""
