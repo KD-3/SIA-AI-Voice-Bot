@@ -61,6 +61,17 @@ class Settings:
     secret_key: str = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
     api_key: str = os.getenv("API_KEY", "dev-api-key-change-in-production")
 
+    # Exotel
+    exotel_account_sid: str = os.getenv("EXOTEL_ACCOUNT_SID", "")
+    exotel_api_key: str = os.getenv("EXOTEL_API_KEY", "")
+    exotel_api_token: str = os.getenv("EXOTEL_API_TOKEN", "")
+    exotel_phone_number: str = os.getenv("EXOTEL_PHONE_NUMBER", "")
+
+    # ngrok (local dev tunnel)
+    enable_ngrok: bool = os.getenv("ENABLE_NGROK", "false").lower() == "true"
+    ngrok_auth_token: str = os.getenv("NGROK_AUTH_TOKEN", "")
+    ngrok_url: str = ""   # set at runtime by startup event; do NOT read from env
+
     # Feature Flags
     enable_call_recording: bool = os.getenv("ENABLE_CALL_RECORDING", "true").lower() == "true"
     enable_analytics: bool = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"

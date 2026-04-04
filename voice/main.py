@@ -1,6 +1,5 @@
 """Main application entry point - FastAPI server for voice agent."""
 
-import asyncio
 import base64
 import json
 import uuid
@@ -12,6 +11,7 @@ import sys
 
 from config import settings
 from orchestrator import CallSession
+from exotel import router as exotel_router, get_active_sessions as get_exo_sessions
 
 # Configure logging
 logger.remove()
@@ -28,8 +28,27 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# Active call sessions
+# Include Exotel router
+app.include_router(exotel_router)
+
+# Active call sessions (Twilio inbound)
 sessions: Dict[str, CallSession] = {}
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start ngrok tunnel on startup (if enabled)."""
+    if settings.enable_ngrok:
+        try:
+            from pyngrok import ngrok, conf
+            if settings.ngrok_auth_token:
+                conf.get_default().auth_token = settings.ngrok_auth_token
+            tunnel = ngrok.connect(settings.app_port, "http")
+            # Strip the https:// prefix — we store just the hostname
+            settings.ngrok_url = tunnel.public_url.replace("https://", "").replace("http://", "")
+            logger.info(f"🌐 ngrok tunnel active: https://{settings.ngrok_url}")
+        except Exception as e:
+            logger.error(f"❌ ngrok startup failed: {e}")
 
 
 @app.get("/")
@@ -49,9 +68,11 @@ async def health():
     return {
         "status": "healthy",
         "twilio_configured": bool(settings.twilio_account_sid),
+        "exotel_configured": bool(settings.exotel_account_sid),
         "openai_configured": bool(settings.openai_api_key),
         "deepgram_configured": bool(settings.deepgram_api_key),
         "elevenlabs_configured": bool(settings.elevenlabs_api_key),
+        "ngrok_url": settings.ngrok_url or None,
     }
 
 
@@ -73,11 +94,9 @@ async def handle_inbound_call(request: Request):
 
     logger.info(f"📞 Incoming call: {caller_id} → {to_number} (Session: {session_id})")
 
-    # Build WebSocket URL (will be wss:// in production with ngrok/production domain)
-    ws_url = f"wss://{request.url.hostname}:{request.url.port}/ws/calls/{session_id}"
-    if settings.app_env == "development":
-        # In dev, use your ngrok URL
-        ws_url = f"wss://YOUR_NGROK_SUBDOMAIN.ngrok.io/ws/calls/{session_id}"
+    # Build WebSocket URL — prefer ngrok tunnel (dev), fall back to request host (prod)
+    ws_host = settings.ngrok_url or request.url.hostname
+    ws_url = f"wss://{ws_host}/ws/calls/{session_id}"
 
     # Return TwiML to connect call to Media Stream
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -186,18 +205,22 @@ async def websocket_call_handler(websocket: WebSocket, session_id: str):
 
 @app.get("/api/sessions")
 async def list_sessions():
-    """List all active call sessions."""
+    """List all active call sessions (Twilio + Exotel)."""
+    twilio_list = [
+        {
+            "session_id": s.session_id,
+            "caller_id": s.caller_id,
+            "provider": "twilio",
+            "started_at": s.started_at.isoformat(),
+            "duration_seconds": s.get_duration(),
+        }
+        for s in sessions.values()
+    ]
+    exotel_list = get_exo_sessions()
+    all_sessions = twilio_list + exotel_list
     return {
-        "active_sessions": len(sessions),
-        "sessions": [
-            {
-                "session_id": s.session_id,
-                "caller_id": s.caller_id,
-                "started_at": s.started_at.isoformat(),
-                "duration_seconds": s.get_duration()
-            }
-            for s in sessions.values()
-        ]
+        "active_sessions": len(all_sessions),
+        "sessions": all_sessions,
     }
 
 
