@@ -19,6 +19,7 @@ class Settings:
     twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "")
     twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "")
     twilio_phone_number: str = os.getenv("TWILIO_PHONE_NUMBER", "")
+    ngrok_url: str = os.getenv("NGROK_URL", "")
 
     # OpenAI
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")

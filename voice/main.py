@@ -73,11 +73,13 @@ async def handle_inbound_call(request: Request):
 
     logger.info(f"📞 Incoming call: {caller_id} → {to_number} (Session: {session_id})")
 
-    # Build WebSocket URL (will be wss:// in production with ngrok/production domain)
-    ws_url = f"wss://{request.url.hostname}:{request.url.port}/ws/calls/{session_id}"
-    if settings.app_env == "development":
-        # In dev, use your ngrok URL
-        ws_url = f"wss://YOUR_NGROK_SUBDOMAIN.ngrok.io/ws/calls/{session_id}"
+    # Build WebSocket URL
+    if settings.ngrok_url:
+        # Use configured ngrok/public URL (development or staging)
+        ws_url = f"{settings.ngrok_url.replace('https://', 'wss://').replace('http://', 'ws:/')}/ws/calls/{session_id}"
+    else:
+        # Production: derive from the incoming request host
+        ws_url = f"wss://{request.url.hostname}:{request.url.port}/ws/calls/{session_id}"
 
     # Return TwiML to connect call to Media Stream
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>

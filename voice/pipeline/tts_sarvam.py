@@ -4,6 +4,7 @@ from typing import Callable, Optional
 from loguru import logger
 import requests
 import base64
+import audioop
 
 from config import settings
 
@@ -90,16 +91,22 @@ class SarvamTTSService:
                 logger.error("❌ TTS: No audio in Sarvam response")
                 return
 
-            # Decode audio
-            audio_bytes = base64.b64decode(audio_base64)
+            # Decode audio (Sarvam returns PCM16 at 8kHz)
+            pcm_audio = base64.b64decode(audio_base64)
+
+            # Convert PCM16 to μ-law (Twilio format)
+            # Sarvam returns 16-bit PCM, we need 8-bit μ-law
+            ulaw_audio = audioop.lin2ulaw(pcm_audio, 2)  # 2 = 16-bit samples
+
+            logger.debug(f"🔊 TTS: Converted {len(pcm_audio)} bytes PCM to {len(ulaw_audio)} bytes μ-law")
 
             # Send in chunks (simulate streaming for Twilio)
-            chunk_size = 640  # 20ms chunks for 8kHz μ-law
-            for i in range(0, len(audio_bytes), chunk_size):
-                chunk = audio_bytes[i:i + chunk_size]
+            chunk_size = 160  # 20ms chunks for 8kHz μ-law (8000 samples/sec * 0.02 sec = 160 bytes)
+            for i in range(0, len(ulaw_audio), chunk_size):
+                chunk = ulaw_audio[i:i + chunk_size]
                 self.on_audio(chunk)
 
-            logger.debug(f"✅ TTS: Streamed {len(audio_bytes)} bytes in chunks")
+            logger.debug(f"✅ TTS: Streamed {len(ulaw_audio)} bytes in {(len(ulaw_audio) + chunk_size - 1) // chunk_size} chunks")
 
         except Exception as e:
             logger.error(f"❌ TTS: Sarvam synthesis error: {e}")

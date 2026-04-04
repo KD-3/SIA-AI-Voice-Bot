@@ -40,12 +40,15 @@ class CallSession:
 
         # State
         self.is_active = False
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
         logger.info(f"📞 Session {session_id}: Created for {caller_id}")
 
     async def initialize(self):
         """Initialize all pipeline services."""
         try:
+            # Store the event loop for thread-safe task scheduling
+            self.loop = asyncio.get_running_loop()
             logger.info(f"🚀 Session {self.session_id}: Initializing pipeline...")
 
             # Initialize STT (Deepgram)
@@ -134,13 +137,15 @@ TONE: Friendly, professional, helpful (like a great SDR)
             self.is_ai_speaking = False
 
         # Generate response from LLM
-        # Get the running event loop and schedule the task
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._process_user_input(transcript))
-        except RuntimeError:
-            # Fallback if no event loop is running
-            asyncio.ensure_future(self._process_user_input(transcript))
+        # Use the stored event loop to schedule the task from the callback thread
+        if self.loop and self.loop.is_running():
+            # Thread-safe way to schedule a coroutine from a different thread
+            asyncio.run_coroutine_threadsafe(
+                self._process_user_input(transcript),
+                self.loop
+            )
+        else:
+            logger.error(f"❌ Session {self.session_id}: Event loop not available")
 
         # Clear transcript buffer
         self.current_transcript = ""
