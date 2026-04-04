@@ -51,7 +51,7 @@ async def health():
         "twilio_configured": bool(settings.twilio_account_sid),
         "openai_configured": bool(settings.openai_api_key),
         "deepgram_configured": bool(settings.deepgram_api_key),
-        "sarvam_configured": bool(settings.sarvam_api_key),
+        "elevenlabs_configured": bool(settings.elevenlabs_api_key),
     }
 
 
@@ -109,8 +109,36 @@ async def websocket_call_handler(websocket: WebSocket, session_id: str):
 
     session: CallSession = None
     caller_id = "Unknown"
+    stream_sid = None
+
+    async def send_audio_loop():
+        """Background task to continuously send audio from queue to Twilio."""
+        nonlocal stream_sid
+        while session and session.is_active:
+            # Check for audio to send
+            audio_out = await session.get_audio_out()
+            if audio_out and stream_sid:
+                # Send audio back to Twilio
+                audio_b64 = base64.b64encode(audio_out).decode('utf-8')
+                try:
+                    await websocket.send_json({
+                        "event": "media",
+                        "streamSid": stream_sid,
+                        "media": {
+                            "payload": audio_b64
+                        }
+                    })
+                except Exception as e:
+                    logger.error(f"❌ Error sending audio: {e}")
+                    break
+            else:
+                # No audio ready, wait a bit
+                await asyncio.sleep(0.02)  # 20ms
 
     try:
+        # Start background audio sending task
+        audio_task = None
+
         # Listen for messages from Twilio
         while True:
             message = await websocket.receive_text()
@@ -121,14 +149,18 @@ async def websocket_call_handler(websocket: WebSocket, session_id: str):
             if event == "start":
                 # Call started - initialize session
                 start_data = data.get("start", {})
+                stream_sid = start_data.get("streamSid")
                 caller_id = start_data.get("customParameters", {}).get("callerId", "Unknown")
 
-                logger.info(f"▶️  Call started: {session_id} from {caller_id}")
+                logger.info(f"▶️  Call started: {session_id} from {caller_id} (stream: {stream_sid})")
 
                 # Create and initialize session
                 session = CallSession(session_id, caller_id)
                 sessions[session_id] = session
                 await session.initialize()
+
+                # Start background audio sender
+                audio_task = asyncio.create_task(send_audio_loop())
 
             elif event == "media":
                 # Audio data received from caller
@@ -143,22 +175,12 @@ async def websocket_call_handler(websocket: WebSocket, session_id: str):
                         # Send to STT
                         await session.process_audio_in(audio_data)
 
-                        # Check if we have audio to send back
-                        audio_out = await session.get_audio_out()
-                        if audio_out:
-                            # Send audio back to Twilio
-                            audio_b64 = base64.b64encode(audio_out).decode('utf-8')
-                            await websocket.send_json({
-                                "event": "media",
-                                "streamSid": data.get("streamSid"),
-                                "media": {
-                                    "payload": audio_b64
-                                }
-                            })
-
             elif event == "stop":
                 # Call ended
                 logger.info(f"⏹️  Call stopped: {session_id}")
+
+                if audio_task:
+                    audio_task.cancel()
 
                 if session:
                     duration = session.get_duration()

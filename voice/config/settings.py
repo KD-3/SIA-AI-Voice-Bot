@@ -27,9 +27,8 @@ class Settings:
     # Deepgram
     deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "")
 
-    # Sarvam AI (Indian TTS)
-    sarvam_api_key: str = os.getenv("SARVAM_API_KEY", "")
-    sarvam_speaker: str = os.getenv("SARVAM_SPEAKER", "priya")  # priya (female) or arkesh (male)
+    # ElevenLabs (TTS with streaming support)
+    elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "")
 
     # Database
     database_url: str = os.getenv("DATABASE_URL", "")

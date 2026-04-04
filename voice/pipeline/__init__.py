@@ -2,6 +2,6 @@
 
 from .stt_service import STTService
 from .llm_service import LLMService
-from .tts_sarvam import SarvamTTSService
+from .tts_elevenlabs import ElevenLabsTTSService
 
-__all__ = ["STTService", "LLMService", "SarvamTTSService"]
+__all__ = ["STTService", "LLMService", "ElevenLabsTTSService"]

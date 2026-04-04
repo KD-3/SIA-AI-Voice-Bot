@@ -119,7 +119,10 @@ class LLMService:
 
     async def generate_response_streaming(self, user_input: str):
         """
-        Generate response with word-by-word streaming.
+        Generate response with sentence-buffered streaming for TTS.
+
+        Buffers text until complete sentences are formed, then streams
+        to TTS for lower latency while maintaining natural speech.
 
         Args:
             user_input: User's message
@@ -139,6 +142,8 @@ class LLMService:
             logger.debug(f"🤖 LLM: Streaming response to: {user_input[:50]}...")
 
             full_response = ""
+            sentence_buffer = ""
+
             stream = await self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
@@ -147,18 +152,34 @@ class LLMService:
                 stream=True,
             )
 
-            # Stream each word/chunk as it arrives
+            # Stream chunks and buffer complete sentences
             async for chunk in stream:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     full_response += content
+                    sentence_buffer += content
 
-                    # Call callback for each chunk (for real-time TTS)
-                    if self.on_response:
-                        self.on_response(content)
+                    # Check if we have a complete sentence
+                    # Look for sentence-ending punctuation
+                    if any(punct in content for punct in ['.', '!', '?', '\n']):
+                        # Clean up the sentence
+                        sentence = sentence_buffer.strip()
+
+                        if sentence and self.on_response:
+                            # Send complete sentence to TTS immediately
+                            logger.debug(f"📤 LLM: Streaming sentence: {sentence[:50]}...")
+                            self.on_response(sentence)
+
+                        # Clear buffer
+                        sentence_buffer = ""
+
+            # Send any remaining text
+            if sentence_buffer.strip() and self.on_response:
+                logger.debug(f"📤 LLM: Streaming final: {sentence_buffer[:50]}...")
+                self.on_response(sentence_buffer.strip())
 
             self.add_assistant_message(full_response)
-            logger.debug(f"✅ LLM: Streaming complete")
+            logger.debug(f"✅ LLM: Streaming complete ({len(full_response)} chars)")
 
         except Exception as e:
             logger.error(f"❌ LLM: Streaming error: {e}")

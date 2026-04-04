@@ -47,9 +47,10 @@ class STTService:
                 channels=1,
                 punctuate=True,
                 interim_results=True,  # Get partial transcripts
-                endpointing=300,  # Detect end of speech after 300ms silence
+                endpointing=200,  # Detect end of speech after 200ms silence (ultra low latency)
                 vad_events=True,  # Voice Activity Detection events
                 smart_format=True,
+                utterance_end_ms=1000,  # Finalize after 1s of silence
             )
 
             # Create live transcription connection

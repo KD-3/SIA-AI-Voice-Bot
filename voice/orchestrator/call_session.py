@@ -6,7 +6,7 @@ from typing import Optional
 from loguru import logger
 from datetime import datetime
 
-from pipeline import STTService, LLMService, SarvamTTSService
+from pipeline import STTService, LLMService, ElevenLabsTTSService
 
 
 class CallSession:
@@ -33,11 +33,12 @@ class CallSession:
         self.current_transcript = ""
         self.is_ai_speaking = False
         self.should_stop_speaking = False
+        self.current_tts_task = None
 
         # Services
         self.stt_service: Optional[STTService] = None
         self.llm_service: Optional[LLMService] = None
-        self.tts_service: Optional[SarvamTTSService] = None
+        self.tts_service: Optional[ElevenLabsTTSService] = None
 
         # State
         self.is_active = False
@@ -64,8 +65,11 @@ class CallSession:
             system_prompt = self._create_system_prompt()
             self.llm_service.set_system_prompt(system_prompt)
 
-            # Initialize TTS (Sarvam AI)
-            self.tts_service = SarvamTTSService(on_audio=self._on_tts_audio)
+            # Initialize TTS (ElevenLabs) with interruption callback
+            self.tts_service = ElevenLabsTTSService(
+                on_audio=self._on_tts_audio,
+                should_stop_callback=lambda: self.should_stop_speaking
+            )
             self.tts_service.connect()
 
             self.is_active = True
@@ -136,10 +140,17 @@ TONE: Friendly, professional, helpful (like a great SDR)
 
         # If AI is currently speaking, this is an interruption
         if self.is_ai_speaking:
-            logger.warning(f"⚠️  Session {self.session_id}: User interrupted AI")
+            logger.warning(f"🛑 Session {self.session_id}: User interrupted AI")
+
+            # Cancel current TTS task
+            if self.current_tts_task and not self.current_tts_task.done():
+                self.current_tts_task.cancel()
+                logger.info(f"❌ Session {self.session_id}: Cancelled TTS task")
+
             # Stop current speech
             self.should_stop_speaking = True
             self.is_ai_speaking = False
+
             # Clear the audio queue
             while not self.audio_out_queue.empty():
                 try:
@@ -163,14 +174,14 @@ TONE: Friendly, professional, helpful (like a great SDR)
 
     async def _process_user_input(self, user_input: str):
         """
-        Process user input through LLM.
+        Process user input through LLM with streaming.
 
         Args:
             user_input: User's message
         """
         try:
-            # Generate response (will call _on_llm_response)
-            await self.llm_service.generate_response(user_input)
+            # Generate streaming response (will call _on_llm_response for each sentence)
+            await self.llm_service.generate_response_streaming(user_input)
         except Exception as e:
             logger.error(f"❌ Session {self.session_id}: Error processing input: {e}")
 
@@ -185,10 +196,13 @@ TONE: Friendly, professional, helpful (like a great SDR)
 
         # Convert text to speech (thread-safe)
         if self.loop and self.loop.is_running():
-            asyncio.run_coroutine_threadsafe(
+            # Create task and track it for cancellation
+            future = asyncio.run_coroutine_threadsafe(
                 self._speak(response),
                 self.loop
             )
+            # Note: We can't directly track this as a task since it's a Future
+            # The cancellation happens via should_stop_speaking flag
         else:
             logger.error(f"❌ Session {self.session_id}: Cannot speak, no event loop")
 
