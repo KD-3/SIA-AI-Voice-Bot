@@ -32,6 +32,7 @@ class CallSession:
         self.audio_out_queue = asyncio.Queue()
         self.current_transcript = ""
         self.is_ai_speaking = False
+        self.should_stop_speaking = False
 
         # Services
         self.stt_service: Optional[STTService] = None
@@ -70,8 +71,11 @@ class CallSession:
             self.is_active = True
             logger.info(f"✅ Session {self.session_id}: Pipeline ready")
 
-            # Send initial greeting
-            await self._send_greeting()
+            # Send initial greeting (non-blocking)
+            asyncio.run_coroutine_threadsafe(
+                self._send_greeting(),
+                self.loop
+            )
 
         except Exception as e:
             logger.error(f"❌ Session {self.session_id}: Initialization failed: {e}")
@@ -133,8 +137,15 @@ TONE: Friendly, professional, helpful (like a great SDR)
         # If AI is currently speaking, this is an interruption
         if self.is_ai_speaking:
             logger.warning(f"⚠️  Session {self.session_id}: User interrupted AI")
-            # TODO: Implement interruption handling (cancel TTS)
+            # Stop current speech
+            self.should_stop_speaking = True
             self.is_ai_speaking = False
+            # Clear the audio queue
+            while not self.audio_out_queue.empty():
+                try:
+                    self.audio_out_queue.get_nowait()
+                except:
+                    break
 
         # Generate response from LLM
         # Use the stored event loop to schedule the task from the callback thread
@@ -172,8 +183,14 @@ TONE: Friendly, professional, helpful (like a great SDR)
         """
         logger.info(f"🤖 Assistant: {response}")
 
-        # Convert text to speech
-        asyncio.create_task(self._speak(response))
+        # Convert text to speech (thread-safe)
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._speak(response),
+                self.loop
+            )
+        else:
+            logger.error(f"❌ Session {self.session_id}: Cannot speak, no event loop")
 
     async def _speak(self, text: str):
         """
@@ -184,15 +201,26 @@ TONE: Friendly, professional, helpful (like a great SDR)
         """
         try:
             self.is_ai_speaking = True
+            self.should_stop_speaking = False
 
-            # Generate speech (will call _on_tts_audio for each chunk)
-            await self.tts_service.synthesize_streaming(text)
+            # Run TTS in thread executor to avoid blocking
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,  # Use default executor
+                self.tts_service.synthesize_streaming,
+                text
+            )
 
-            self.is_ai_speaking = False
+            # Only mark as done if we weren't interrupted
+            if not self.should_stop_speaking:
+                self.is_ai_speaking = False
+            else:
+                logger.info(f"🛑 Session {self.session_id}: Speech interrupted")
 
         except Exception as e:
             logger.error(f"❌ Session {self.session_id}: TTS error: {e}")
             self.is_ai_speaking = False
+            self.should_stop_speaking = False
 
     def _on_tts_audio(self, audio_chunk: bytes):
         """
@@ -201,8 +229,10 @@ TONE: Friendly, professional, helpful (like a great SDR)
         Args:
             audio_chunk: Raw audio bytes
         """
-        # Add to output queue to be sent to Twilio
-        self.audio_out_queue.put_nowait(audio_chunk)
+        # Don't add audio if we've been interrupted
+        if not self.should_stop_speaking:
+            # Add to output queue to be sent to Twilio
+            self.audio_out_queue.put_nowait(audio_chunk)
 
     async def process_audio_in(self, audio_data: bytes):
         """
