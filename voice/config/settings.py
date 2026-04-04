@@ -1,81 +1,80 @@
 """Configuration settings for the voice agent."""
 
-from pydantic_settings import BaseSettings
-from typing import Optional
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 
-class Settings(BaseSettings):
+class Settings:
     """Application settings loaded from environment variables."""
 
     # Application
-    app_env: str = "development"
-    app_port: int = 8000
-    log_level: str = "INFO"
+    app_env: str = os.getenv("APP_ENV", "development")
+    app_port: int = int(os.getenv("APP_PORT", "8000"))
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
     # Twilio
-    twilio_account_sid: str
-    twilio_auth_token: str
-    twilio_phone_number: str
+    twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+    twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+    twilio_phone_number: str = os.getenv("TWILIO_PHONE_NUMBER", "")
 
     # OpenAI
-    openai_api_key: str
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
 
     # Deepgram
-    deepgram_api_key: str
+    deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "")
 
     # Sarvam AI (Indian TTS)
-    sarvam_api_key: str
-    sarvam_speaker: str = "meera"  # meera (female) or arkesh (male)
+    sarvam_api_key: str = os.getenv("SARVAM_API_KEY", "")
+    sarvam_speaker: str = os.getenv("SARVAM_SPEAKER", "priya")  # priya (female) or arkesh (male)
 
     # Database
-    database_url: str
-    redis_url: str = "redis://localhost:6379/0"
+    database_url: str = os.getenv("DATABASE_URL", "")
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
     # Pinecone
-    pinecone_api_key: Optional[str] = None
-    pinecone_environment: str = "us-east-1"
-    pinecone_index_name: str = "voice-bot-knowledge"
+    pinecone_api_key: str = os.getenv("PINECONE_API_KEY", "")
+    pinecone_environment: str = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
+    pinecone_index_name: str = os.getenv("PINECONE_INDEX_NAME", "voice-bot-knowledge")
 
     # CRM (Optional)
-    hubspot_api_key: Optional[str] = None
-    salesforce_client_id: Optional[str] = None
-    salesforce_client_secret: Optional[str] = None
+    hubspot_api_key: str = os.getenv("HUBSPOT_API_KEY", "")
+    salesforce_client_id: str = os.getenv("SALESFORCE_CLIENT_ID", "")
+    salesforce_client_secret: str = os.getenv("SALESFORCE_CLIENT_SECRET", "")
 
     # Google Calendar (Optional)
-    google_calendar_credentials_path: Optional[str] = None
+    google_calendar_credentials_path: str = os.getenv("GOOGLE_CALENDAR_CREDENTIALS_PATH", "")
 
     # SendGrid (Optional)
-    sendgrid_api_key: Optional[str] = None
-    sendgrid_from_email: Optional[str] = None
+    sendgrid_api_key: str = os.getenv("SENDGRID_API_KEY", "")
+    sendgrid_from_email: str = os.getenv("SENDGRID_FROM_EMAIL", "")
 
     # Security
-    secret_key: str = "dev-secret-key-change-in-production"
-    api_key: str = "dev-api-key-change-in-production"
+    secret_key: str = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
+    api_key: str = os.getenv("API_KEY", "dev-api-key-change-in-production")
 
     # Feature Flags
-    enable_call_recording: bool = True
-    enable_analytics: bool = True
-    enable_crm_sync: bool = False
+    enable_call_recording: bool = os.getenv("ENABLE_CALL_RECORDING", "true").lower() == "true"
+    enable_analytics: bool = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"
+    enable_crm_sync: bool = os.getenv("ENABLE_CRM_SYNC", "false").lower() == "true"
 
     # Conversation Settings
-    max_conversation_duration_seconds: int = 600  # 10 minutes
-    session_ttl_seconds: int = 86400  # 24 hours
+    max_conversation_duration_seconds: int = int(os.getenv("MAX_CONVERSATION_DURATION_SECONDS", "600"))  # 10 minutes
+    session_ttl_seconds: int = int(os.getenv("SESSION_TTL_SECONDS", "86400"))  # 24 hours
 
     # AI Settings
-    stt_model: str = "nova-2"
-    stt_language: str = "en-US"
-    llm_model: str = "gpt-4o-realtime-preview"
-    tts_model: str = "eleven_turbo_v2_5"
+    stt_model: str = os.getenv("STT_MODEL", "nova-2")
+    stt_language: str = os.getenv("STT_LANGUAGE", "en-US")
+    llm_model: str = os.getenv("LLM_MODEL", "gpt-4o-realtime-preview")
+    tts_model: str = os.getenv("TTS_MODEL", "bulbul:v3")
 
     # Latency Targets (milliseconds)
-    target_stt_latency_ms: int = 50
-    target_llm_latency_ms: int = 150
-    target_tts_latency_ms: int = 50
-    target_total_latency_ms: int = 250
-
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    target_stt_latency_ms: int = int(os.getenv("TARGET_STT_LATENCY_MS", "50"))
+    target_llm_latency_ms: int = int(os.getenv("TARGET_LLM_LATENCY_MS", "150"))
+    target_tts_latency_ms: int = int(os.getenv("TARGET_TTS_LATENCY_MS", "50"))
+    target_total_latency_ms: int = int(os.getenv("TARGET_TOTAL_LATENCY_MS", "250"))
 
 
 # Global settings instance

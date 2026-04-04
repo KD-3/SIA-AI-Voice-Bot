@@ -61,7 +61,7 @@ class STTService:
             self.connection.on(LiveTranscriptionEvents.Close, self._on_close)
 
             # Start connection
-            if await self.connection.start(options):
+            if self.connection.start(options):
                 self.is_connected = True
                 logger.info("✅ STT: Connected to Deepgram")
             else:
@@ -124,7 +124,7 @@ class STTService:
         """Close connection to Deepgram."""
         if self.connection:
             try:
-                await self.connection.finish()
+                self.connection.finish()
                 logger.info("👋 STT: Disconnected from Deepgram")
             except Exception as e:
                 logger.error(f"❌ STT: Error disconnecting: {e}")

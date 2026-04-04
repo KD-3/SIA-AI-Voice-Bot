@@ -62,15 +62,12 @@ class SarvamTTSService:
             payload = {
                 "inputs": [text],
                 "target_language_code": "hi-IN",  # Hindi-English (Indian accent)
-                "speaker": "meera",  # Female voice (options: meera, ar
+                "speaker": "priya",  # Female voice (options: meera, arkesh)  # Female voice (options: meera, arkesh)
 
-kesh)
-                "pitch": 0,
                 "pace": 1.0,
-                "loudness": 1.5,
                 "speech_sample_rate": 8000,  # Match Twilio's 8kHz
                 "enable_preprocessing": True,
-                "model": "bulbul:v1"
+                "model": "bulbul:v3"
             }
 
             # Make API call
@@ -136,13 +133,11 @@ kesh)
             payload = {
                 "inputs": [text],
                 "target_language_code": "hi-IN",
-                "speaker": "meera",
-                "pitch": 0,
+                "speaker": "priya",
                 "pace": 1.0,
-                "loudness": 1.5,
                 "speech_sample_rate": 8000,
                 "enable_preprocessing": True,
-                "model": "bulbul:v1"
+                "model": "bulbul:v3"
             }
 
             response = requests.post(
