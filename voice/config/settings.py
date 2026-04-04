@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     # Deepgram
     deepgram_api_key: str
 
-    # ElevenLabs
-    elevenlabs_api_key: str
-    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"  # Rachel voice
+    # Sarvam AI (Indian TTS)
+    sarvam_api_key: str
+    sarvam_speaker: str = "meera"  # meera (female) or arkesh (male)
 
     # Database
     database_url: str

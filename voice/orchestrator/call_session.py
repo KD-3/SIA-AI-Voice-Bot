@@ -6,7 +6,7 @@ from typing import Optional
 from loguru import logger
 from datetime import datetime
 
-from pipeline import STTService, LLMService, TTSService
+from pipeline import STTService, LLMService, SarvamTTSService
 
 
 class CallSession:
@@ -36,7 +36,7 @@ class CallSession:
         # Services
         self.stt_service: Optional[STTService] = None
         self.llm_service: Optional[LLMService] = None
-        self.tts_service: Optional[TTSService] = None
+        self.tts_service: Optional[SarvamTTSService] = None
 
         # State
         self.is_active = False
@@ -60,8 +60,8 @@ class CallSession:
             system_prompt = self._create_system_prompt()
             self.llm_service.set_system_prompt(system_prompt)
 
-            # Initialize TTS (ElevenLabs)
-            self.tts_service = TTSService(on_audio=self._on_tts_audio)
+            # Initialize TTS (Sarvam AI)
+            self.tts_service = SarvamTTSService(on_audio=self._on_tts_audio)
             self.tts_service.connect()
 
             self.is_active = True
