@@ -51,7 +51,7 @@ async def health():
         "twilio_configured": bool(settings.twilio_account_sid),
         "openai_configured": bool(settings.openai_api_key),
         "deepgram_configured": bool(settings.deepgram_api_key),
-        "elevenlabs_configured": bool(settings.elevenlabs_api_key),
+        "sarvam_configured": bool(settings.sarvam_api_key),
     }
 
 
