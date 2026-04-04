@@ -203,10 +203,10 @@ TONE: Friendly, professional, helpful (like a great SDR)
             self.is_ai_speaking = True
             self.should_stop_speaking = False
 
-            # Run TTS in thread executor to avoid blocking
+            # Run TTS in thread executor (it uses blocking requests.post)
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
-                None,  # Use default executor
+                None,  # Use default thread pool
                 self.tts_service.synthesize_streaming,
                 text
             )

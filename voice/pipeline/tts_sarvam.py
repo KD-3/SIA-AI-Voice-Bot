@@ -34,7 +34,7 @@ class SarvamTTSService:
             logger.error(f"❌ TTS: Failed to initialize Sarvam: {e}")
             raise
 
-    async def synthesize_streaming(self, text: str):
+    def synthesize_streaming(self, text: str):
         """
         Convert text to speech using Sarvam AI.
 
@@ -112,7 +112,7 @@ class SarvamTTSService:
             logger.error(f"❌ TTS: Sarvam synthesis error: {e}")
             raise
 
-    async def synthesize(self, text: str) -> bytes:
+    def synthesize(self, text: str) -> bytes:
         """
         Convert text to speech and return complete audio.
 
