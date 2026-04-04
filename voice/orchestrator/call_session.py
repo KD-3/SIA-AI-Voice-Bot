@@ -6,7 +6,15 @@ from typing import Dict, Optional
 from loguru import logger
 from datetime import datetime
 
-from pipeline import STTService, LLMService, SarvamTTSService, AppointmentService, APPOINTMENT_TOOLS
+from pipeline import (
+    STTService,
+    LLMService,
+    SarvamTTSService,
+    AppointmentService,
+    APPOINTMENT_TOOLS,
+    CompetitorKBService,
+    COMPETITOR_KB_TOOLS,
+)
 
 
 class CallSession:
@@ -49,6 +57,9 @@ class CallSession:
         self.lead_area: str = lead.get("lead_area", "")   # LLM will extract if blank
         self.needs_document_collection: bool = lead.get("needs_document_collection", False)
 
+        # ── Detected competitor context (updated during conversation) ────────
+        self.detected_competitor: str = lead.get("current_competitor", "")
+
         # ── Audio buffers ────────────────────────────────────────────────────
         self.audio_out_queue: asyncio.Queue = asyncio.Queue()
         self.current_transcript: str = ""
@@ -59,6 +70,7 @@ class CallSession:
         self.llm_service: Optional[LLMService] = None
         self.tts_service: Optional[SarvamTTSService] = None
         self.appointment_service: Optional[AppointmentService] = None
+        self.competitor_kb: Optional[CompetitorKBService] = None
 
         self.is_active: bool = False
 
@@ -82,11 +94,17 @@ class CallSession:
             # Appointment service
             self.appointment_service = AppointmentService()
 
-            # LLM (GPT-4o) — wired with appointment tools + handler
+            # Competitor KB service (Feature #2)
+            self.competitor_kb = CompetitorKBService()
+
+            # Merge all tool definitions: Appointment (#4) + Competitor KB (#2)
+            all_tools = APPOINTMENT_TOOLS + COMPETITOR_KB_TOOLS
+
+            # LLM (GPT-4o) — wired with all tools + handler
             self.llm_service = LLMService(
                 on_response=self._on_llm_response,
                 on_function_call=self._handle_function_call,
-                tools=APPOINTMENT_TOOLS,
+                tools=all_tools,
             )
             self.llm_service.connect()
             self.llm_service.set_system_prompt(self._create_system_prompt())
@@ -123,20 +141,70 @@ class CallSession:
             if self.needs_document_collection
             else "- No prior document collection request."
         )
-        return f"""You are Priya, a friendly Paytm AI sales assistant.
+        competitor_line = (
+            f"- Known competitor in use: {self.detected_competitor}"
+            if self.detected_competitor
+            else "- No competitor info yet — detect from conversation."
+        )
 
-ROLE: You help merchants understand Paytm products and set appointments for demos or document collection.
+        return f"""You are Priya, a friendly and persuasive Paytm AI sales assistant.
+
+ROLE: You qualify merchant intent, identify the best Paytm product for them, handle competitor objections using data from the knowledge base, and set appointments for demos or document collection.
 
 SESSION CONTEXT:
 - Caller: {self.caller_id}
 - Merchant name: {self.lead_name}
 {area_line}
 {docs_line}
+{competitor_line}
 - Current time: {self.started_at.strftime('%A, %d %B %Y at %I:%M %p IST')}
 
-TOOLS AVAILABLE:
-1. check_appointment_slots — call this as soon as the merchant agrees to a demo or KYC visit.
-2. book_appointment — call this only AFTER the merchant has explicitly confirmed a specific slot.
+═══════════════════════════════════════════════════════════════
+KNOWLEDGE BASE TOOLS (Feature #2 — Competitor Intelligence)
+═══════════════════════════════════════════════════════════════
+
+1. recommend_product_for_merchant
+   WHEN: After learning the merchant's business type and pain points (usually after 1-2 discovery questions).
+   WHY: Get a data-driven product recommendation instead of guessing.
+
+2. lookup_paytm_product
+   WHEN: You need specific pricing, features, or USPs to pitch or answer a question.
+   WHY: Never make up pricing or features — always look up from the KB.
+
+3. get_competitor_intel
+   WHEN: The merchant mentions they use or were approached by a competitor (PhonePe, BharatPe, Razorpay, Pine Labs, Google Pay, Mswipe).
+   WHY: Get their weaknesses and Paytm's specific advantages to use in your pitch.
+
+4. get_objection_rebuttal
+   WHEN: The merchant raises an objection (pricing, already using competitor, don't need it, etc.).
+   WHY: Get a proven, tested rebuttal script with key talking points.
+   IMPORTANT: Adapt the rebuttal to sound natural in conversation — don't read it verbatim.
+
+5. get_comparison_matrix
+   WHEN: The merchant is explicitly comparing options or asks "why Paytm over X?".
+   WHY: Get a structured side-by-side comparison to present.
+
+KB USAGE RULES:
+- ALWAYS use lookup_paytm_product before quoting any pricing or feature details.
+- ALWAYS use get_competitor_intel when a competitor is mentioned.
+- When a merchant objects, ALWAYS call get_objection_rebuttal BEFORE responding.
+- Use the rebuttal as inspiration — adapt it to fit the conversation naturally.
+- Never say "according to our database" — present information as your own knowledge.
+- Focus on 2-3 key differentiators per response, not all of them.
+
+SELLING APPROACH:
+1. DISCOVER: Ask about their business, current payment setup, and pain points.
+2. RECOMMEND: Use recommend_product_for_merchant to find the best fit.
+3. PITCH: Use lookup_paytm_product to deliver a tailored pitch.
+4. HANDLE OBJECTIONS: Use get_objection_rebuttal for any pushback.
+5. CLOSE: If interested, move to appointment booking.
+
+═══════════════════════════════════════════════════════════════
+APPOINTMENT TOOLS (Feature #4)
+═══════════════════════════════════════════════════════════════
+
+6. check_appointment_slots — call when the merchant agrees to a demo or KYC visit.
+7. book_appointment — call ONLY AFTER the merchant confirms a specific slot.
 
 APPOINTMENT FLOW:
 1. When the merchant agrees to a demo (or KYC visit), call check_appointment_slots with their area and appointment_type.
@@ -150,14 +218,46 @@ DOCUMENT COLLECTION NOTE:
 If the merchant earlier asked for document collection, mention it while confirming the slot:
 "I'll also let [rep_name] know to collect your KYC documents during the visit."
 
-GENERAL INSTRUCTIONS:
+═══════════════════════════════════════════════════════════════
+DEVICE DELIVERY & ACTIVATION TOOLS (Feature #4 Extension)
+═══════════════════════════════════════════════════════════════
+
+8. confirm_device_delivery
+   WHEN: Merchant has agreed to the product AND confirmed KYC documents are ready/submitted.
+   WHY: Log the delivery, inform the merchant of their expected delivery date (3 business days).
+   AFTER CALLING: ALWAYS ask — "Would you also like one of our field engineers to visit and help you set up the device when it arrives?"
+
+9. check_activation_slots
+   WHEN: Merchant says yes to activation help.
+   WHY: Find available field engineer slots in the merchant's zone.
+   NOTE: Field engineers use zones (e.g. "Central Bengaluru", "East Mumbai") — different from sales rep areas. Ask the merchant to confirm their zone if unsure.
+
+10. book_activation_appointment
+    WHEN: Merchant explicitly confirms a specific activation slot.
+    WHY: Book the field engineer and send SMS confirmation.
+
+DEVICE DELIVERY + ACTIVATION FLOW:
+1. Merchant agrees to product + KYC confirmed → call confirm_device_delivery(product_name, area).
+2. Narrate: "Your [product] will be delivered by [delivery_date]. I've also sent you an SMS with the details."
+3. Immediately follow up: "Would you like one of our field engineers to come and help you activate the device?"
+4. If yes → call check_activation_slots(zone) — use or ask for their zone.
+5. Present slots: "I have [slot 1], [slot 2], or [slot 3] — which works best for you?"
+6. Merchant confirms → call book_activation_appointment(slot_id, product_name).
+7. Confirm: "Done! Your activation appointment with [engineer_name] is set for [readable_time]. I've sent the details to your phone."
+8. If merchant declines activation help — acknowledge and close the conversation warmly.
+
+═══════════════════════════════════════════════════════════════
+GENERAL INSTRUCTIONS
+═══════════════════════════════════════════════════════════════
 - Be warm and conversational, not robotic.
 - Keep responses concise (1-3 sentences for voice).
 - Never make up slot times — always use check_appointment_slots first.
+- Never make up pricing or features — always use lookup_paytm_product.
 - If the merchant's area is not known, ask: "Which area are you based in? For example, South Bengaluru or North Mumbai?"
 - Recommend digital KYC over physical document collection whenever possible.
+- If a merchant uses a competitor, acknowledge it positively before differentiating.
 
-TONE: Friendly, professional, helpful — like a great sales assistant at a top fintech company.
+TONE: Friendly, confident, knowledgeable — like a great sales consultant who genuinely wants to help.
 """
 
     # ── Greeting ──────────────────────────────────────────────────────────────
@@ -210,19 +310,20 @@ TONE: Friendly, professional, helpful — like a great sales assistant at a top 
     def _on_tts_audio(self, audio_chunk: bytes):
         self.audio_out_queue.put_nowait(audio_chunk)
 
-    # ── Function call handler (Feature #4) ───────────────────────────────────
+    # ── Function call handler (Features #2 + #4) ──────────────────────────────
 
     async def _handle_function_call(self, function_name: str, args: Dict) -> str:
         """
-        Dispatches LLM tool calls to AppointmentService.
+        Dispatches LLM tool calls to AppointmentService or CompetitorKBService.
 
         Returns:
             JSON string to feed back to the LLM as the tool result.
         """
-        if not self.appointment_service:
-            return json.dumps({"error": "Appointment service not initialised."})
-
+        # ── Feature #4: Appointment tools ────────────────────────────────
         if function_name == "check_appointment_slots":
+            if not self.appointment_service:
+                return json.dumps({"error": "Appointment service not initialised."})
+
             area = args.get("area", self.lead_area or "")
             appt_type = args.get("appointment_type", "demo")
 
@@ -242,6 +343,9 @@ TONE: Friendly, professional, helpful — like a great sales assistant at a top 
             return json.dumps(result)
 
         if function_name == "book_appointment":
+            if not self.appointment_service:
+                return json.dumps({"error": "Appointment service not initialised."})
+
             slot_id = args.get("slot_id", "")
             appt_type = args.get("appointment_type", "demo")
             needs_docs = args.get("needs_document_collection", self.needs_document_collection)
@@ -260,6 +364,112 @@ TONE: Friendly, professional, helpful — like a great sales assistant at a top 
                 f"📅 Booking result for session {self.session_id}: "
                 f"success={result.get('success')}"
             )
+            return json.dumps(result)
+
+        # ── Feature #4 extension: Device delivery + activation ───────────
+        if function_name == "confirm_device_delivery":
+            if not self.appointment_service:
+                return json.dumps({"error": "Appointment service not initialised."})
+
+            result = await self.appointment_service.confirm_device_delivery(
+                lead_phone=self.caller_id,
+                product_name=args.get("product_name", "Paytm Device"),
+                lead_name=self.lead_name,
+                area=args.get("area", self.lead_area or ""),
+            )
+            logger.info(
+                f"📦 Delivery confirmed for session {self.session_id}: "
+                f"date={result.get('delivery_date')}"
+            )
+            return json.dumps(result)
+
+        if function_name == "check_activation_slots":
+            if not self.appointment_service:
+                return json.dumps({"error": "Appointment service not initialised."})
+
+            zone = args.get("zone", "")
+            if not zone:
+                return json.dumps({
+                    "error": "Zone is required. Ask the merchant which zone they are in, e.g. Central Bengaluru or East Mumbai."
+                })
+
+            result = await self.appointment_service.find_activation_slots(zone)
+            logger.info(
+                f"🔧 Activation slots for zone {zone}: {len(result.get('slots', []))} option(s)"
+            )
+            return json.dumps(result)
+
+        if function_name == "book_activation_appointment":
+            if not self.appointment_service:
+                return json.dumps({"error": "Appointment service not initialised."})
+
+            slot_id = args.get("slot_id", "")
+            if not slot_id:
+                return json.dumps({"error": "slot_id is required."})
+
+            result = await self.appointment_service.book_activation_appointment(
+                slot_id=slot_id,
+                lead_phone=self.caller_id,
+                product_name=args.get("product_name", "Paytm Device"),
+                lead_name=self.lead_name,
+            )
+            logger.info(
+                f"🔧 Activation booking for session {self.session_id}: "
+                f"success={result.get('success')}"
+            )
+            return json.dumps(result)
+
+        # ── Feature #2: Competitor KB tools ──────────────────────────────
+        if not self.competitor_kb:
+            if function_name in (
+                "lookup_paytm_product", "recommend_product_for_merchant",
+                "get_competitor_intel", "get_objection_rebuttal",
+                "get_comparison_matrix",
+            ):
+                return json.dumps({"error": "Competitor KB not initialised."})
+
+        if function_name == "lookup_paytm_product":
+            product_id = args.get("product_id", "")
+            result = self.competitor_kb.get_product_details(product_id)
+            logger.info(f"📦 KB lookup: product={product_id}")
+            return json.dumps(result)
+
+        if function_name == "recommend_product_for_merchant":
+            result = self.competitor_kb.recommend_product(args)
+            recs = result.get("recommendations", [])
+            logger.info(
+                f"🎯 KB recommendation: {len(recs)} product(s) for "
+                f"biz_type={args.get('business_type', '?')}"
+            )
+            return json.dumps(result)
+
+        if function_name == "get_competitor_intel":
+            competitor_id = args.get("competitor_id", "")
+            include_full = args.get("include_full_profile", False)
+
+            # Track detected competitor for context
+            if competitor_id and not self.detected_competitor:
+                self.detected_competitor = competitor_id
+
+            if include_full:
+                result = self.competitor_kb.get_competitor_profile(competitor_id)
+            else:
+                result = self.competitor_kb.get_competitor_weaknesses(competitor_id)
+            logger.info(f"🕵️ KB competitor intel: {competitor_id}")
+            return json.dumps(result)
+
+        if function_name == "get_objection_rebuttal":
+            competitor_id = args.get("competitor_id", "generic")
+            objection_type = args.get("objection_type", "")
+            result = self.competitor_kb.get_rebuttal(competitor_id, objection_type)
+            logger.info(f"🛡️ KB rebuttal: ({competitor_id}, {objection_type})")
+            return json.dumps(result)
+
+        if function_name == "get_comparison_matrix":
+            category = args.get("category", "")
+            competitors = args.get("competitors", None)
+            result = self.competitor_kb.get_comparison(category, competitors)
+            logger.info(f"📊 KB comparison: {category}")
             return json.dumps(result)
 
         return json.dumps({"error": f"Unknown function: {function_name}"})

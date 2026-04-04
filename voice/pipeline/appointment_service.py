@@ -3,11 +3,19 @@ Appointment Setting Service (Feature #4)
 
 Responsibilities:
   - Query Firestore for sales reps in the merchant's area
-  - Check Google Calendar free/busy for each rep
+  - Check Google Calendar free/busy for each rep / field engineer
   - Cache candidate slots in Firestore (pending_slots collection)
   - Create confirmed Calendar events
-  - Persist confirmed appointments in Firestore
+  - Persist confirmed appointments / deliveries in Firestore
   - Send SMS confirmation via Twilio
+
+Collections used:
+  sales_reps              – SDR roster (area-based)
+  field_engineers         – FE roster (zone-based, separate hierarchy)
+  pending_slots           – Ephemeral slot cache (TTL'd by Firestore TTL policy)
+  appointments            – Confirmed sales-rep appointments (demo / KYC)
+  activation_appointments – Confirmed field-engineer activation visits
+  device_deliveries       – Device delivery records
 """
 
 import json
@@ -235,6 +243,177 @@ class AppointmentService:
             "sms_sent": sms_sent,
         }
 
+    async def confirm_device_delivery(
+        self,
+        lead_phone: str,
+        product_name: str,
+        lead_name: str = "Merchant",
+        area: str = "",
+    ) -> Dict:
+        """
+        Trigger device delivery after KYC confirmation.
+
+        - Computes delivery date (3 business days Mon–Sat from today IST)
+        - Saves a record in Firestore `device_deliveries`
+        - Sends SMS to merchant
+        Returns structured result for LLM to narrate.
+        """
+        today_ist = (datetime.now(timezone.utc) + self.IST_OFFSET).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        delivery_date = self._add_business_days(today_ist, 3)
+        readable_date = delivery_date.strftime("%A, %d %B %Y")
+
+        delivery_data = {
+            "lead_phone": lead_phone,
+            "lead_name": lead_name,
+            "product_name": product_name,
+            "area": area,
+            "delivery_date": delivery_date.isoformat(),
+            "status": "scheduled",
+            "created_at": fs.SERVER_TIMESTAMP,
+        }
+        _, ref = self.db.collection("device_deliveries").add(delivery_data)
+        logger.info(f"📦 Delivery scheduled: {ref.id} | {product_name} → {readable_date}")
+
+        sms = (
+            f"Great news! Your {product_name} order is confirmed.\n"
+            f"Expected delivery: {readable_date}\n"
+            f"Our delivery partner will contact you before arrival.\n"
+            f"Queries? Call Paytm Support: 0120-4456-456"
+        )
+        sms_sent = self._send_sms(lead_phone, sms)
+
+        return {
+            "success": True,
+            "delivery_id": ref.id,
+            "product_name": product_name,
+            "delivery_date": readable_date,
+            "sms_sent": sms_sent,
+        }
+
+    async def find_activation_slots(self, zone: str) -> Dict:
+        """
+        Find available activation slots for field engineers in the given zone.
+
+        Uses the `field_engineers` Firestore collection (separate from sales_reps).
+        Returns same slot structure as find_available_slots for consistency.
+        """
+        engineers = self._get_engineers_by_zone(zone)
+        if not engineers:
+            logger.warning(f"🔧 No field engineers found for zone: {zone}")
+            return {"zone": zone, "slots": []}
+
+        all_slots: List[Dict] = []
+        for eng in engineers:
+            slots = self._get_free_slots(eng, slot_key_prefix="fe")
+            all_slots.extend(slots)
+            if len(all_slots) >= self.SLOTS_TO_OFFER * 2:
+                break
+
+        all_slots.sort(key=lambda s: s["start_iso"])
+        top = all_slots[: self.SLOTS_TO_OFFER]
+
+        for slot in top:
+            self.db.collection("pending_slots").document(slot["slot_id"]).set(slot)
+
+        logger.info(f"🔧 Found {len(top)} activation slot(s) for zone: {zone}")
+        return {"zone": zone, "slots": top}
+
+    async def book_activation_appointment(
+        self,
+        slot_id: str,
+        lead_phone: str,
+        product_name: str,
+        lead_name: str = "Merchant",
+    ) -> Dict:
+        """
+        Confirm an activation appointment with a field engineer.
+
+        Creates a Google Calendar event on the engineer's calendar,
+        saves to `activation_appointments`, sends SMS confirmation.
+        """
+        slot_doc = self.db.collection("pending_slots").document(slot_id).get()
+        if not slot_doc.exists:
+            return {"success": False, "error": "Slot not found or has expired. Please check activation slots again."}
+
+        slot = slot_doc.to_dict()
+        engineer = self._get_engineer_by_id(slot["rep_id"])
+        if not engineer:
+            return {"success": False, "error": "Field engineer not found."}
+
+        event_body = {
+            "summary": f"Paytm Device Activation – {lead_name} ({product_name})",
+            "description": (
+                f"Device activation visit\n"
+                f"Product: {product_name}\n"
+                f"Merchant: {lead_name}\n"
+                f"Phone: {lead_phone}"
+            ),
+            "start": {"dateTime": slot["start_iso"], "timeZone": "Asia/Kolkata"},
+            "end":   {"dateTime": slot["end_iso"],   "timeZone": "Asia/Kolkata"},
+            "attendees": [{"email": engineer["email"]}],
+            "reminders": {
+                "useDefault": False,
+                "overrides": [
+                    {"method": "email", "minutes": 60},
+                    {"method": "popup", "minutes": 15},
+                ],
+            },
+        }
+
+        try:
+            created = self.cal.events().insert(
+                calendarId=engineer["calendar_id"],
+                body=event_body,
+                sendUpdates="all",
+            ).execute()
+            calendar_event_id = created.get("id", "")
+            logger.info(f"🔧 Activation Calendar event created: {calendar_event_id}")
+        except Exception as e:
+            logger.error(f"❌ Activation Calendar booking failed: {e}")
+            return {"success": False, "error": f"Calendar booking failed: {str(e)}"}
+
+        appt_data = {
+            "lead_phone": lead_phone,
+            "lead_name": lead_name,
+            "engineer_id": engineer["id"],
+            "engineer_name": engineer["name"],
+            "engineer_phone": engineer["phone"],
+            "zone": engineer["zone"],
+            "product_name": product_name,
+            "start_iso": slot["start_iso"],
+            "end_iso": slot["end_iso"],
+            "calendar_event_id": calendar_event_id,
+            "status": "confirmed",
+            "created_at": fs.SERVER_TIMESTAMP,
+        }
+        _, ref = self.db.collection("activation_appointments").add(appt_data)
+        self.db.collection("pending_slots").document(slot_id).delete()
+
+        start_dt = datetime.fromisoformat(slot["start_iso"])
+        ist_dt = start_dt + self.IST_OFFSET
+        readable_time = ist_dt.strftime("%A, %d %B at %I:%M %p IST")
+
+        sms = (
+            f"Your Paytm device activation is confirmed!\n"
+            f"Product: {product_name}\n"
+            f"Date: {readable_time}\n"
+            f"Field Engineer: {engineer['name']} ({engineer['phone']})\n"
+            f"Zone: {engineer['zone']}\n"
+            f"Please keep the device and charger ready."
+        )
+        sms_sent = self._send_sms(lead_phone, sms)
+
+        return {
+            "success": True,
+            "appointment_id": ref.id,
+            "engineer_name": engineer["name"],
+            "engineer_phone": engineer["phone"],
+            "readable_time": readable_time,
+            "sms_sent": sms_sent,
+        }
+
     # ── Firestore helpers ─────────────────────────────────────────────────────
 
     def _get_reps_by_area(self, area: str) -> List[Dict]:
@@ -268,9 +447,53 @@ class AppointmentService:
         doc = self.db.collection("sales_reps").document(rep_id).get()
         return {"id": doc.id, **doc.to_dict()} if doc.exists else None
 
+    def _get_engineers_by_zone(self, zone: str) -> List[Dict]:
+        """Return active field engineers whose zone matches (with fallback partial match)."""
+        docs = (
+            self.db.collection("field_engineers")
+            .where("zone", "==", zone)
+            .where("active", "==", True)
+            .stream()
+        )
+        engineers = [{"id": d.id, **d.to_dict()} for d in docs]
+
+        if not engineers:
+            all_docs = (
+                self.db.collection("field_engineers")
+                .where("active", "==", True)
+                .stream()
+            )
+            zone_lower = zone.lower()
+            engineers = [
+                {"id": d.id, **d.to_dict()}
+                for d in all_docs
+                if zone_lower in d.to_dict().get("zone", "").lower()
+                or any(
+                    part in d.to_dict().get("zone", "").lower()
+                    for part in zone_lower.split()
+                )
+            ]
+
+        return engineers
+
+    def _get_engineer_by_id(self, engineer_id: str) -> Optional[Dict]:
+        doc = self.db.collection("field_engineers").document(engineer_id).get()
+        return {"id": doc.id, **doc.to_dict()} if doc.exists else None
+
+    @staticmethod
+    def _add_business_days(from_date: datetime, days: int) -> datetime:
+        """Add N business days (Mon–Sat, skip Sun) to a date."""
+        result = from_date
+        added = 0
+        while added < days:
+            result += timedelta(days=1)
+            if result.weekday() != 6:  # skip Sunday
+                added += 1
+        return result
+
     # ── Google Calendar free-slot finder ─────────────────────────────────────
 
-    def _get_free_slots(self, rep: Dict) -> List[Dict]:
+    def _get_free_slots(self, rep: Dict, slot_key_prefix: str = "sr") -> List[Dict]:
         """
         Return up to (SLOTS_TO_OFFER) free 30-min slots for a rep
         within the next LOOK_AHEAD_DAYS business hours.
@@ -309,7 +532,7 @@ class AppointmentService:
             )
 
             if is_business and not self._overlaps_busy(cursor, slot_end, busy_periods):
-                slot_id = f"{rep['id']}_{cursor.strftime('%Y%m%dT%H%M%SZ')}"
+                slot_id = f"{slot_key_prefix}_{rep['id']}_{cursor.strftime('%Y%m%dT%H%M%SZ')}"
                 slots.append({
                     "slot_id": slot_id,
                     "rep_id": rep["id"],

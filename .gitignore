@@ -27,6 +27,11 @@ Thumbs.db
 *.pem
 credentials.json
 
+# Firebase service account keys — NEVER commit these
+*firebase-adminsdk*.json
+serviceAccount.json
+service-account.json
+
 # Node
 node_modules/
 .next/
