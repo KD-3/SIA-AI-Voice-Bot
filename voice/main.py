@@ -41,6 +41,8 @@ app.add_middleware(
 
 # Active call sessions
 sessions: Dict[str, CallSession] = {}
+# Completed sessions — retained for post-call summary API
+completed_sessions: Dict[str, CallSession] = {}
 
 
 @app.get("/")
@@ -139,7 +141,7 @@ async def trigger_outbound_call(call_req: OutboundCallRequest):
 async def get_latest_call_summary():
     """Return the most recently completed call's summary and transcript."""
     completed = [
-        s for s in sessions.values()
+        s for s in list(sessions.values()) + list(completed_sessions.values())
         if s.call_summary is not None
     ]
     if not completed:
@@ -153,7 +155,7 @@ async def get_latest_call_summary():
 @app.get("/api/calls/{session_id}/summary")
 async def get_call_summary(session_id: str):
     """Return a specific session's post-call summary and transcript."""
-    session = sessions.get(session_id)
+    session = sessions.get(session_id) or completed_sessions.get(session_id)
     if not session:
         return {"ready": False, "error": "Session not found"}
     if not session.call_summary:
@@ -263,7 +265,9 @@ async def websocket_call_handler(websocket: WebSocket, session_id: str):
 
                     # Cleanup
                     await session.cleanup()
-                    del sessions[session_id]
+                    # Move to completed store (preserves summary for API)
+                    completed_sessions[session_id] = session
+                    sessions.pop(session_id, None)
 
                 break
 
@@ -276,9 +280,9 @@ async def websocket_call_handler(websocket: WebSocket, session_id: str):
     finally:
         # Cleanup if session still exists
         if session_id in sessions:
-            session = sessions[session_id]
+            session = sessions.pop(session_id)
             await session.cleanup()
-            del sessions[session_id]
+            completed_sessions[session_id] = session
 
         logger.info(f"👋 Session ended: {session_id}")
 

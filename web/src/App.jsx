@@ -164,7 +164,7 @@ export default function App() {
       if (data.success) {
         setCallStatus('dispatched');
         // Start polling for summary after a brief delay (call needs time)
-        setTimeout(startPolling, 30000);
+        setTimeout(startPolling, 5000);
       } else {
         setCallStatus('error');
       }
