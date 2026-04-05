@@ -38,3 +38,8 @@ out/
 venv/
 *.pyc
 .pytest_cache/
+
+# Project Specific Ignored Local Files
+generate_report.py
+AI_Voice_Bot_Research_Report.docx
+~$_Voice_Bot_Research_Report.docx
