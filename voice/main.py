@@ -135,6 +135,32 @@ async def trigger_outbound_call(call_req: OutboundCallRequest):
         return {"success": False, "error": str(e)}
 
 
+@app.get("/api/calls/latest/summary")
+async def get_latest_call_summary():
+    """Return the most recently completed call's summary and transcript."""
+    completed = [
+        s for s in sessions.values()
+        if s.call_summary is not None
+    ]
+    if not completed:
+        return {"ready": False}
+    
+    # Return the most recently ended session
+    latest = max(completed, key=lambda s: s.started_at)
+    return {"ready": True, "data": latest.call_summary}
+
+
+@app.get("/api/calls/{session_id}/summary")
+async def get_call_summary(session_id: str):
+    """Return a specific session's post-call summary and transcript."""
+    session = sessions.get(session_id)
+    if not session:
+        return {"ready": False, "error": "Session not found"}
+    if not session.call_summary:
+        return {"ready": False}
+    return {"ready": True, "data": session.call_summary}
+
+
 @app.websocket("/ws/calls/{session_id}")
 async def websocket_call_handler(websocket: WebSocket, session_id: str):
     """

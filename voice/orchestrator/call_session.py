@@ -47,6 +47,10 @@ class CallSession:
         self.is_active = False
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
+        # Transcript & Post-call data
+        self.transcript: list[dict] = []  # [{"role": "user"|"assistant", "text": ...}]
+        self.call_summary: Optional[dict] = None  # populated after call ends
+
         logger.info(f"📞 Session {session_id}: Created for {caller_id}")
 
     async def initialize(self):
@@ -164,6 +168,9 @@ CONVERSATION FLOW:
             self.current_transcript = transcript
             return
 
+        # Capture user utterance in transcript log
+        self.transcript.append({"role": "user", "text": transcript})
+
         # Final transcript received
         logger.info(f"👤 User: {transcript}")
 
@@ -229,6 +236,9 @@ CONVERSATION FLOW:
             response: LLM's response text
         """
         logger.info(f"🤖 Assistant: {response}")
+
+        # Capture assistant response in transcript log
+        self.transcript.append({"role": "assistant", "text": response})
 
         # Send to sequential TTS queue (thread-safe)
         if self.loop and self.loop.is_running():
@@ -334,7 +344,60 @@ CONVERSATION FLOW:
         if self.stt_service:
             await self.stt_service.disconnect()
 
+        # Generate post-call summary
+        try:
+            await self._generate_summary()
+        except Exception as e:
+            logger.error(f"❌ Summary generation failed: {e}")
+
         logger.info(f"👋 Session {self.session_id}: Cleaned up")
+
+    async def _generate_summary(self):
+        """Use GPT to generate a structured post-call summary."""
+        if not self.transcript:
+            return
+
+        from openai import AsyncOpenAI
+        from config.settings import settings
+        import json
+
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+        # Build a plain text version of the transcript for GPT
+        transcript_text = "\n".join(
+            f"{t['role'].upper()}: {t['text']}" for t in self.transcript
+        )
+
+        prompt = f"""You are a CRM analyst. Analyze the following sales call transcript between an AI agent (Sia from Paytm) and a merchant prospect.
+
+Transcript:
+{transcript_text}
+
+Respond ONLY with valid JSON in the following format:
+{{
+  "summary": "<2-3 sentence summary of the call>",
+  "lead_rating": <integer 1 to 5, where 5 is highly interested>,
+  "sentiment": "<Positive|Neutral|Negative>",
+  "key_highlights": ["<highlight 1>", "<highlight 2>"],
+  "next_actions": ["<action 1>", "<action 2>"]
+}}"""
+
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        summary_json = json.loads(response.choices[0].message.content)
+        self.call_summary = {
+            **summary_json,
+            "transcript": self.transcript,
+            "duration_seconds": int(self.get_duration()),
+            "caller_id": self.caller_id,
+            "session_id": self.session_id,
+        }
+        logger.info(f"📋 Session {self.session_id}: Summary generated — Rating {summary_json.get('lead_rating')}/5")
 
     def get_duration(self) -> float:
         """Get call duration in seconds."""
