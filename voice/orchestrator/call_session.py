@@ -34,6 +34,9 @@ class CallSession:
         self.is_ai_speaking = False
         self.should_stop_speaking = False
         self.current_tts_task = None
+        self.tts_sentence_queue = asyncio.Queue()
+        self.tts_worker_task = None
+        self.current_llm_task = None
 
         # Services
         self.stt_service: Optional[STTService] = None
@@ -75,6 +78,9 @@ class CallSession:
             self.is_active = True
             logger.info(f"✅ Session {self.session_id}: Pipeline ready")
 
+            # Start TTS worker task
+            self.tts_worker_task = self.loop.create_task(self._tts_worker())
+
             # Send initial greeting (non-blocking)
             asyncio.run_coroutine_threadsafe(
                 self._send_greeting(),
@@ -87,7 +93,7 @@ class CallSession:
 
     def _create_system_prompt(self) -> str:
         """Create system prompt for the AI agent."""
-        return f"""You are SIA, a calm, smooth, and empathetic AI voice agent by Paytm.
+        return f"""You are Sia, a calm, smooth, and empathetic AI voice agent by Paytm.
 
 ROLE: You reach out to potential customers to pitch Paytm's merchant devices (like Soundbox, EDC, POS), explain their USPs, and how they are better than the competition. Your ultimate goal is to convince the person to buy a device and schedule an appointment date and time for a human sales agent to call them and finalize the setup.
 
@@ -129,12 +135,30 @@ CONVERSATION FLOW:
 
     def _on_transcript(self, transcript: str, is_final: bool):
         """
-        Handle transcript from STT.
-
-        Args:
-            transcript: Transcribed text
-            is_final: Whether this is the final transcript
+        Handle transcript from STT (called from Deepgram's background thread).
         """
+        if self.loop and self.loop.is_running():
+            # Thread-safe handoff to the asyncio event loop
+            self.loop.call_soon_threadsafe(
+                self._handle_transcript_threadsafe, transcript, is_final
+            )
+        else:
+            logger.error(f"❌ Session {self.session_id}: Event loop not available")
+
+    def _handle_transcript_threadsafe(self, transcript: str, is_final: bool):
+        """Synchronously executed within the event loop to manage strictly ordered task execution."""
+        if is_final:
+            # INTERRUPT: Cancel the previous generation task instantly to stop stale data
+            if self.current_llm_task and not self.current_llm_task.done():
+                self.current_llm_task.cancel()
+                logger.info(f"🛑 Session {self.session_id}: Hard-cancelled previous LLM processing task")
+
+            self.current_llm_task = asyncio.create_task(self._async_on_transcript(transcript, is_final))
+        else:
+            asyncio.create_task(self._async_on_transcript(transcript, is_final))
+
+    async def _async_on_transcript(self, transcript: str, is_final: bool):
+        """Async implementation of transcript handling running on the main event loop."""
         if not is_final:
             # Interim result - accumulate
             self.current_transcript = transcript
@@ -156,23 +180,25 @@ CONVERSATION FLOW:
             self.should_stop_speaking = True
             self.is_ai_speaking = False
 
+            # Clear sentence queue
+            while not self.tts_sentence_queue.empty():
+                try:
+                    self.tts_sentence_queue.get_nowait()
+                except:
+                    break
+
             # Clear the audio queue
             while not self.audio_out_queue.empty():
                 try:
                     self.audio_out_queue.get_nowait()
                 except:
                     break
+            
+            # Notify main loop to clear the Twilio media buffer
+            self.audio_out_queue.put_nowait(b"CLEAR")
 
         # Generate response from LLM
-        # Use the stored event loop to schedule the task from the callback thread
-        if self.loop and self.loop.is_running():
-            # Thread-safe way to schedule a coroutine from a different thread
-            asyncio.run_coroutine_threadsafe(
-                self._process_user_input(transcript),
-                self.loop
-            )
-        else:
-            logger.error(f"❌ Session {self.session_id}: Event loop not available")
+        await self._process_user_input(transcript)
 
         # Clear transcript buffer
         self.current_transcript = ""
@@ -185,8 +211,13 @@ CONVERSATION FLOW:
             user_input: User's message
         """
         try:
+            # We are generating a new response, so re-enable speaking!
+            self.should_stop_speaking = False
+
             # Generate streaming response (will call _on_llm_response for each sentence)
             await self.llm_service.generate_response_streaming(user_input)
+        except asyncio.CancelledError:
+            logger.info(f"🛑 Session {self.session_id}: LLM processing safely cancelled by interruption")
         except Exception as e:
             logger.error(f"❌ Session {self.session_id}: Error processing input: {e}")
 
@@ -199,17 +230,28 @@ CONVERSATION FLOW:
         """
         logger.info(f"🤖 Assistant: {response}")
 
-        # Convert text to speech (thread-safe)
+        # Send to sequential TTS queue (thread-safe)
         if self.loop and self.loop.is_running():
-            # Create task and track it for cancellation
-            future = asyncio.run_coroutine_threadsafe(
-                self._speak(response),
-                self.loop
-            )
-            # Note: We can't directly track this as a task since it's a Future
-            # The cancellation happens via should_stop_speaking flag
+            self.loop.call_soon_threadsafe(self.tts_sentence_queue.put_nowait, response)
         else:
             logger.error(f"❌ Session {self.session_id}: Cannot speak, no event loop")
+
+    async def _tts_worker(self):
+        """Background task to synthesize and speak sentences strictly sequentially."""
+        while self.is_active:
+            try:
+                # Wait for next sentence
+                sentence = await self.tts_sentence_queue.get()
+                
+                # Speak it if we haven't been interrupted
+                if not self.should_stop_speaking:
+                    await self._speak(sentence)
+                
+                self.tts_sentence_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"❌ TTS worker error: {e}")
 
     async def _speak(self, text: str):
         """
@@ -284,6 +326,9 @@ CONVERSATION FLOW:
         logger.info(f"🧹 Session {self.session_id}: Cleaning up...")
 
         self.is_active = False
+
+        if self.tts_worker_task:
+            self.tts_worker_task.cancel()
 
         # Disconnect services
         if self.stt_service:

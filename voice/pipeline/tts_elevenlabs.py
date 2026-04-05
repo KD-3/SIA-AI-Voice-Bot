@@ -26,7 +26,7 @@ class ElevenLabsTTSService:
         self.on_audio = on_audio
         self.should_stop_callback = should_stop_callback
         self.api_key = settings.elevenlabs_api_key
-        self.voice_id = "pNInz6obpgDQGcFmaJgB"  # Adam (free tier)
+        self.voice_id = "EXAVITQu4vr4xnSDxMaL"  # Bella - warm, confident, empathetic female voice
         self.is_connected = False
 
     def connect(self):

@@ -6,6 +6,8 @@ import json
 import uuid
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from fastapi.responses import Response
 from loguru import logger
 import sys
@@ -26,6 +28,15 @@ app = FastAPI(
     title="AI Voice Bot",
     description="Autonomous voice agent for lead conversion",
     version="0.1.0"
+)
+
+# CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Active call sessions
@@ -97,6 +108,33 @@ async def handle_inbound_call(request: Request):
     return Response(content=twiml, media_type="application/xml")
 
 
+class OutboundCallRequest(BaseModel):
+    phone_number: str
+
+
+@app.post("/api/calls/outbound")
+async def trigger_outbound_call(call_req: OutboundCallRequest):
+    """API trigger to make an outbound call."""
+    from twilio.rest import Client
+    
+    if not settings.ngrok_url:
+        return {"success": False, "error": "NGROK_URL not set in environment"}
+        
+    client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+    webhook_url = f"{settings.ngrok_url.rstrip('/')}/api/calls/inbound"
+    
+    try:
+        call = client.calls.create(
+            to=call_req.phone_number,
+            from_=settings.twilio_phone_number,
+            url=webhook_url,
+            method="POST"
+        )
+        return {"success": True, "sid": call.sid, "status": call.status}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.websocket("/ws/calls/{session_id}")
 async def websocket_call_handler(websocket: WebSocket, session_id: str):
     """
@@ -118,19 +156,30 @@ async def websocket_call_handler(websocket: WebSocket, session_id: str):
             # Check for audio to send
             audio_out = await session.get_audio_out()
             if audio_out and stream_sid:
-                # Send audio back to Twilio
-                audio_b64 = base64.b64encode(audio_out).decode('utf-8')
-                try:
-                    await websocket.send_json({
-                        "event": "media",
-                        "streamSid": stream_sid,
-                        "media": {
-                            "payload": audio_b64
-                        }
-                    })
-                except Exception as e:
-                    logger.error(f"❌ Error sending audio: {e}")
-                    break
+                if audio_out == b"CLEAR":
+                    # Interrupt Twilio's playback buffer
+                    try:
+                        await websocket.send_json({
+                            "event": "clear",
+                            "streamSid": stream_sid
+                        })
+                        logger.info(f"🧹 Clearing Twilio playback buffer for {stream_sid}")
+                    except Exception as e:
+                        logger.error(f"❌ Error sending clear: {e}")
+                else:
+                    # Send audio back to Twilio
+                    audio_b64 = base64.b64encode(audio_out).decode('utf-8')
+                    try:
+                        await websocket.send_json({
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {
+                                "payload": audio_b64
+                            }
+                        })
+                    except Exception as e:
+                        logger.error(f"❌ Error sending audio: {e}")
+                        break
             else:
                 # No audio ready, wait a bit
                 await asyncio.sleep(0.02)  # 20ms
