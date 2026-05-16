@@ -1,6 +1,6 @@
 # S.I.A — Sales Intelligence Assistant (AI SDR Voice Bot)
 
-An autonomous AI voice agent by Paytm that handles outbound merchant calls, qualifies leads, books appointments, and updates CRM — all without human intervention.
+An autonomous AI voice agent that handles outbound merchant calls, qualifies leads, books appointments, and updates CRM — all without human intervention.
 
 ## Business Goal
 **S.I.A (Sales Intelligence Assistant)** creates a fully automated, end-to-end outbound sales workflow. As soon as a fresh lead lands in the CRM, the system automatically triggers a personalized voice call equipped with full CRM context. Post-call, the entire transcript, engagement summary, and lead rating are instantly parsed and posted back to the CRM profile. This continuous feedback loop autonomously triggers standard follow-ups or seamlessly routes high-intent leads to a human agent for final closure.
